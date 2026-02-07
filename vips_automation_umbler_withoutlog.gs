@@ -1,0 +1,198 @@
+/**
+ * CONFIGURAÇÕES DA UMBLERTALK
+ * Substitua os valores abaixo pelos seus dados da plataforma
+ */
+const UMBLER_CONFIG = {
+  url: "https://app-utalk.umbler.com/api/v1/messages/simplified/",
+  fromPhone: "+5561993133245",              // Seu número conectado na Umbler
+  organizationId: "aYVFlxsdK39dR3qp",   // Seu ID de organização
+  token: "gsheets-2026-02-06-2094-02-24--3A185F99EE642369A819C7FD6CDAAE935761D5EBB253075294D4A475D7D18374"             // Caso a API exija Bearer Token ou API Key
+};
+
+/**
+ * Cria o menu personalizado.
+ */
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('😨Enviar UmblerTalk')
+      .addItem('Enviar Linha Selecionada (Single)', 'enviarApenasLinhaSelecionada')
+      .addSeparator()
+      .addItem('Enviar Todas as Linhas (Bulk)', 'iteraExcelEnviaWebhookUmbler')
+      .addToUi();
+}
+
+/**
+ * Função BULK: Itera por toda a aba e envia para UmblerTalk.
+ */
+function iteraExcelEnviaWebhookUmbler() {
+  var planilha = SpreadsheetApp.getActiveSpreadsheet();
+  var aba = planilha.getSheetByName("Página14");
+  var dados = aba.getDataRange().getValues();
+
+  var contagemProcessados = 0;
+  var atualizacoesStatus = [];
+
+  planilha.toast("Iniciando envio via UmblerTalk...", "Automação", 3);
+
+  for (var i = 1; i < dados.length; i++) {
+    var linha = dados[i];
+
+    var mensagem     = linha[8];   // Coluna I
+    var contato      = linha[9];   // Coluna J
+    var nome         = linha[1];   // Coluna B
+    var statusEnvio  = linha[10];  // Coluna K (checkbox)
+
+    // ❌ Pula se já enviado
+    if (statusEnvio === true) continue;
+
+    // ❌ Validação básica
+    if (!mensagem || !contato) {
+      atualizacoesStatus.push([false]);
+      continue;
+    }
+
+    var telefoneLimpo = "+"+ contato.toString().replace(/\D/g, '');
+
+
+    var payload = {
+      toPhone: telefoneLimpo,
+      fromPhone: UMBLER_CONFIG.fromPhone,
+      organizationId: UMBLER_CONFIG.organizationId,
+      message: mensagem,
+      file: null,
+      skipReassign: false,
+      contactName: nome || ""
+    };
+
+    var opcoes = {
+      method: "post",
+      contentType: "application/json",
+      headers: {
+        Authorization: "Bearer " + UMBLER_CONFIG.token
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+
+    try {
+      var response = UrlFetchApp.fetch(UMBLER_CONFIG.url, opcoes);
+      var statusCode = response.getResponseCode();
+      var body = response.getContentText();
+
+      if (statusCode === 200 || statusCode === 201) {
+        contagemProcessados++;
+        atualizacoesStatus.push([true]);
+      } else {
+        console.log("Erro HTTP linha " + (i + 1) + ": " + statusCode + " | " + body);
+        atualizacoesStatus.push([false]);
+      }
+
+      // Feedback a cada 5 envios
+      if (contagemProcessados > 0 && contagemProcessados % 5 === 0) {
+        planilha.toast(
+          "Enviados: " + contagemProcessados,
+          "Progresso Umbler",
+          2
+        );
+      }
+
+      // Evita rate limit
+      Utilities.sleep(300);
+
+    } catch (e) {
+      console.log("Erro na linha " + (i + 1) + ": " + e);
+      atualizacoesStatus.push([false]);
+    }
+  }
+
+  // 🔥 Atualiza todos os checkboxes de uma vez
+  if (atualizacoesStatus.length > 0) {
+    aba.getRange(2, 11, atualizacoesStatus.length, 1)
+       .setValues(atualizacoesStatus);
+  }
+
+  planilha.toast(
+    "Finalizado! " + contagemProcessados + " mensagens enviadas via UmblerTalk ✅",
+    "Sucesso",
+    10
+  );
+}
+
+
+/**
+ * Função SINGLE: Envia apenas a linha ativa (refatorada).
+ */
+function enviarApenasLinhaSelecionada() {
+  var planilha = SpreadsheetApp.getActiveSpreadsheet();
+  var aba = planilha.getActiveSheet();
+  var linhaAtiva = aba.getActiveCell().getRow();
+
+  // ❌ Evita cabeçalho
+  if (linhaAtiva === 1) {
+    SpreadsheetApp.getUi().alert("Selecione uma linha válida abaixo do cabeçalho.");
+    return;
+  }
+
+  var dadosLinha = aba
+    .getRange(linhaAtiva, 1, 1, aba.getLastColumn())
+    .getValues()[0];
+
+  var nome        = dadosLinha[1];   // Coluna B
+  var mensagem    = dadosLinha[8];   // Coluna I
+  var contato     = dadosLinha[9];   // Coluna J
+  var statusEnvio = dadosLinha[10];  // Coluna K (checkbox)
+
+  // ❌ Já enviado
+  if (statusEnvio === true) {
+    planilha.toast("Esta linha já foi enviada ✅", "Aviso", 4);
+    return;
+  }
+
+  // ❌ Validação básica
+  if (!mensagem || !contato) {
+    planilha.toast("Erro: Mensagem ou contato ausente.", "Falha", 5);
+    return;
+  }
+
+  var telefoneLimpo = "+" + contato.toString().replace(/\D/g, '');
+
+  var payload = {
+    toPhone: telefoneLimpo,
+    fromPhone: UMBLER_CONFIG.fromPhone,
+    organizationId: UMBLER_CONFIG.organizationId,
+    message: mensagem,
+    file: null,
+    skipReassign: false,
+    contactName: nome || ""
+  };
+
+  var opcoes = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      Authorization: "Bearer " + UMBLER_CONFIG.token
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    planilha.toast("Enviando para UmblerTalk...", "Status", 2);
+
+    var response = UrlFetchApp.fetch(UMBLER_CONFIG.url, opcoes);
+    var statusCode = response.getResponseCode();
+    var body = response.getContentText();
+
+    if (statusCode === 200 || statusCode === 201) {
+      aba.getRange(linhaAtiva, 11).setValue(true); // Marca checkbox
+      planilha.toast("Mensagem enviada com sucesso ✅", "UmblerTalk", 5);
+    } else {
+      console.log("Erro HTTP linha " + linhaAtiva + ": " + statusCode + " | " + body);
+      SpreadsheetApp.getUi().alert("Erro Umbler: " + body);
+    }
+
+  } catch (e) {
+    console.log("Erro técnico linha " + linhaAtiva + ": " + e);
+    SpreadsheetApp.getUi().alert("Erro técnico: " + e.toString());
+  }
+}
