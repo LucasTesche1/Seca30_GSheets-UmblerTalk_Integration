@@ -1,0 +1,297 @@
+  /**
+ * CONFIGURAÇÕES UMBLER
+ */
+const UMBLER_CONFIG = {
+  url: "https://app-utalk.umbler.com/api/v1/messages/simplified/",
+  fromPhone: "",
+  organizationId: "",
+  token: ""
+};
+
+var DIAS_EXCECAO = [1, 108, 129, 143, 171, 192, 206, 227, 234, 248, 262, 283, 297, 318, 325, 353, 360];
+
+/**
+ * Aciona o Bot específico via endpoint start-bot
+ */
+function dispararBotUmbler(telefoneLimpo, nome) {
+  var urlBot = "https://app-utalk.umbler.com/api/v1/chats/start-bot/";
+  
+  var payload = {
+    "toPhone": telefoneLimpo,
+    "fromPhone": UMBLER_CONFIG.fromPhone,
+    "organizationId": UMBLER_CONFIG.organizationId,
+    "botId": "",
+    "triggerName": "",
+    "contactName": nome
+  };
+
+  var opcoes = {
+    "method": "post",
+    "contentType": "application/json",
+    "headers": { "Authorization": "Bearer " + UMBLER_CONFIG.token },
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
+  };
+
+  try {
+    var response = UrlFetchApp.fetch(urlBot, opcoes);
+    var resContent = response.getContentText();
+    console.log("Resposta Start-Bot: " + resContent);
+    return response.getResponseCode();
+  } catch (e) {
+    console.log("Erro ao disparar start-bot: " + e);
+    return 500;
+  }
+}
+
+function substituiVariavelNomeAluna(mensagem, nomeCompleto){
+  return mensagem.replace("${nome_aluna}", nomeCompleto.split(" ")[0])
+}
+
+/**
+ * Registra logs normais de envio
+ */
+function registrarLog(nome, contato, dias, mensagem, tipo, status) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var abaLog = ss.getSheetByName("Log_Envios");
+  
+  if (!abaLog) {
+    abaLog = ss.insertSheet("Log_Envios");
+    abaLog.appendRow(["Data/Hora", "Nome", "Contato", "Dias", "Mensagem", "Tipo", "Status"]);
+    abaLog.getRange("A1:G1").setFontWeight("bold").setBackground("#f3f3f3");
+  }
+  
+  abaLog.appendRow([new Date(), nome, contato, dias, mensagem, tipo, status]);
+}
+
+/**
+ * Registra casos que caíram na lista de exceção
+ */
+function registrarAtencao(nome, contato, dias, mensagem, tipo) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var abaAtencao = ss.getSheetByName("REQUER_ATENCAO");
+  
+  if (!abaAtencao) {
+    abaAtencao = ss.insertSheet("REQUER_ATENCAO");
+    abaAtencao.appendRow(["Data/Hora", "Nome", "Contato", "Dias", "Mensagem", "Tipo", "Alerta"]);
+    abaAtencao.getRange("A1:G1").setFontWeight("bold").setBackground("#ffe5e5"); // Vermelho claro para destaque
+  }
+  
+  abaAtencao.appendRow([new Date(), nome, contato, dias, mensagem, tipo, "REQUER ATENÇÃO"]);
+}
+
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('🚀 Enviar Umbler test')
+      .addItem('Enviar Linha Selecionada (Single)', 'enviarApenasLinhaSelecionada')
+      .addSeparator()
+      .addItem('Enviar Todas as Linhas (Bulk)', 'iteraExcelEnviaWebhookUmbler')
+      .addToUi();
+}
+
+function enviaHojeOuNao(dias, quinzenal, mensal) {
+  // A verificação de exceção agora é tratada individualmente nas funções de loop 
+  // para permitir o registro no log específico antes do 'continue/return'
+  if (quinzenal) {
+    var aptoPara14dias = (dias - 17) >= 0 && (dias - 17) % 14 === 0;
+    return aptoPara14dias;
+  } else if (mensal) {
+    var aptoPara28dias = (dias - 17) >= 0 && (dias - 17) % 28 === 0;
+    return aptoPara28dias;
+  } else {
+    return true;
+  }
+}
+
+/**
+ * Função BULK de envio para Umbler
+ */
+function iteraExcelEnviaWebhookUmbler() {
+  var planilha = SpreadsheetApp.getActiveSpreadsheet();
+  var aba = planilha.getSheetByName("TESTCASE");
+  var dados = aba.getDataRange().getValues();
+
+  var contagemProcessados = 0;
+
+  planilha.toast("Iniciando envio via UmblerTalk...", "Automação", 3);
+
+  for (var i = 1; i < dados.length; i++) {
+    var dadosLinha = dados[i];
+    var numeroLinhaNaPlanilha = i + 1;
+
+    var nome           = dadosLinha[1];   // Coluna B
+    var dias           = dadosLinha[4];   // Coluna E
+    var semInteracaoCs = dadosLinha[6];
+    var msgNaoTratada  = dadosLinha[8];   // Coluna I
+    var contato        = dadosLinha[9];   // Coluna J
+    var statusCheckbox = dadosLinha[10];  // Coluna K
+    var quinzenal      = dadosLinha[12];  // Coluna M
+    var mensal         = dadosLinha[13];  // Coluna N
+    var naoRecebeMensagem = dadosLinha[14]// Coluna O
+    var mensagem = substituiVariavelNomeAluna(msgNaoTratada, nome);
+
+    // 1. Pular se já estiver marcado ou se o nome for vazio
+    if (statusCheckbox === true || !nome) continue;
+
+    if (semInteracaoCs) continue;
+
+    if (naoRecebeMensagem) continue;
+
+    // 2. Verificação de Exceção
+    if (DIAS_EXCECAO.includes(Number(dias))) {
+      registrarAtencao(nome, contato, dias, mensagem, "Bulk");
+      continue;
+    }
+
+    // 3. Verificação de Regra de Negócio (Quinzenal/Mensal)
+    if (enviaHojeOuNao(dias, quinzenal, mensal) == false) continue;
+
+    // 4. Validação de dados básicos
+    if (!mensagem || !contato) continue;
+
+    var telefoneLimpo = "+" + contato.toString().replace(/\D/g, '');
+
+    var payload = {
+      toPhone: telefoneLimpo,
+      fromPhone: UMBLER_CONFIG.fromPhone,
+      organizationId: UMBLER_CONFIG.organizationId,
+      message: mensagem,
+      file: null,
+      skipReassign: false,
+      dias : dias,
+      contactName: nome || "",
+    };
+
+    var opcoes = {
+      method: "post",
+      contentType: "application/json",
+      headers: { Authorization: "Bearer " + UMBLER_CONFIG.token },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+
+    Utilities.sleep(4000);
+    try {
+          var response = UrlFetchApp.fetch(UMBLER_CONFIG.url, opcoes);
+          var statusCode = response.getResponseCode();
+
+          if (statusCode === 200 || statusCode === 201) {
+            // --- ATUALIZAÇÃO IMEDIATA ---
+            registrarLog(nome, telefoneLimpo, dias, mensagem, "Bulk", "✅Enviado");
+            
+            // Marca o checkbox na coluna K (11) imediatamente
+            aba.getRange(numeroLinhaNaPlanilha, 11).setValue(true); 
+
+            dispararBotUmbler(telefoneLimpo,nome);
+
+            contagemProcessados++;
+            
+            // Feedback visual a cada envio
+            if (contagemProcessados % 5 === 0) {
+              planilha.toast("Enviados: " + contagemProcessados, "Progresso", 1);
+            }
+          } else {
+            registrarLog(nome, telefoneLimpo, dias, mensagem, "Bulk", "Erro HTTP " + statusCode);
+          }
+        } catch (e) {
+          console.log("Erro na linha " + numeroLinhaNaPlanilha + ": " + e);
+        }
+  }
+  planilha.toast("Finalizado! " + contagemProcessados + " mensagens processadas ✅", "Sucesso", 10);
+}
+
+/**
+ * Função SINGLE: Envio individual para Umbler.
+ */
+function enviarApenasLinhaSelecionada() {
+  var planilha = SpreadsheetApp.getActiveSpreadsheet();
+  var aba = planilha.getActiveSheet();
+  var linhaAtiva = aba.getActiveCell().getRow();
+
+  if (linhaAtiva === 1) {
+    SpreadsheetApp.getUi().alert("❌ Erro: Selecione uma linha de dados.");
+    return;
+  }
+
+  var dadosLinha = aba.getRange(linhaAtiva, 1, 1, 15).getValues()[0];
+
+  var nome           = dadosLinha[1];   // Coluna B
+  var dias           = dadosLinha[4];   // Coluna E
+  var semInteracaoCs = dadosLinha[6];   // Coluna G
+  var msgNaoTratada  = dadosLinha[8];   // Coluna I
+  var contato        = dadosLinha[9];   // Coluna J
+  var statusCheckbox = dadosLinha[10];  // Coluna K
+  var quinzenal      = dadosLinha[12];  // Coluna M
+  var mensal         = dadosLinha[13];  // Coluna N
+  var naoRecebeMensagem = dadosLinha[14]  // Coluna O
+  var mensagem = substituiVariavelNomeAluna(msgNaoTratada, nome);
+
+  // --- VERIFICAÇÃO DE EXCEÇÃO ---
+  if (DIAS_EXCECAO.includes(Number(dias))) {
+    registrarAtencao(nome, contato, dias, mensagem, "Single");
+    SpreadsheetApp.getUi().alert("⚠️ Dia Crítico detectado (" + dias + "). Movido para aba REQUER_ATENCAO.");
+    return;
+  }
+
+  if (semInteracaoCs){
+    SpreadsheetApp.getUi().alert("⚠️ Aviso: Esta linha não cumpre os requisitos de envio (Cliente não quer interação!).");
+    return;
+  } 
+
+  if (naoRecebeMensagem){
+    SpreadsheetApp.getUi().alert("⚠️ Aviso: Esta linha não cumpre os requisitos de envio (Cliente não deve receber mensagens!).");
+    return;
+  }
+   
+
+  if (enviaHojeOuNao(dias, quinzenal, mensal) === false) {
+    SpreadsheetApp.getUi().alert("⚠️ Aviso: Esta linha não cumpre os requisitos de data.");
+    return;
+  }
+
+  if (statusCheckbox === true) {
+    planilha.toast("Esta linha já consta como enviada ✅", "Aviso", 4);
+    return;
+  }
+
+  var telefoneLimpo = "+" + contato.toString().replace(/\D/g, '');
+
+  var payload = {
+    toPhone: telefoneLimpo,
+    fromPhone: UMBLER_CONFIG.fromPhone,
+    organizationId: UMBLER_CONFIG.organizationId,
+    message: mensagem,
+    file: null,
+    skipReassign: false,
+    dias : dias,
+    contactName: nome || "",
+  };
+
+  var opcoes = {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + UMBLER_CONFIG.token },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+
+  try {
+    planilha.toast("Disparando Webhook...", "UmblerTalk", 2);
+    var response = UrlFetchApp.fetch(UMBLER_CONFIG.url, opcoes);
+    var statusCode = response.getResponseCode();
+
+    if (statusCode === 200 || statusCode === 201) {
+      registrarLog(nome, telefoneLimpo, dias, mensagem, "Single", "✅Enviado");
+      aba.getRange(linhaAtiva, 11).setValue(true); 
+      planilha.toast("Webhook processado! ✅", "Sucesso", 5);
+      dispararBotUmbler(telefoneLimpo, nome);
+    } else {
+      registrarLog(nome, telefoneLimpo, dias, mensagem, "Single", "Erro Webhook " + statusCode);
+      SpreadsheetApp.getUi().alert("Erro no Webhook (Status " + statusCode + ")");
+    }
+  } catch (e) {
+    SpreadsheetApp.getUi().alert("Erro técnico: " + e.toString());
+  }
+}
+
